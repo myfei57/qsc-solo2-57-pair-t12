@@ -1,0 +1,61 @@
+{
+  "platform": {
+    "name": "heatnet",
+    "storage_root": "var/state"
+  },
+  "limits": {
+    "source": {
+      "supply_target_c": 92.0,
+      "supply_max_c": 115.0,
+      "return_min_c": 35.0,
+      "flow_min_t_h": 900.0,
+      "flow_max_t_h": 4200.0,
+      "quality_confirm_s": 12.0,
+      "adjust_rate_c_s": 0.35
+    },
+    "curve": {
+      "outdoor_min_c": -26.0,
+      "outdoor_max_c": 18.0,
+      "supply_low_c": 55.0,
+      "supply_high_c": 95.0,
+      "stale_after_s": 1800.0
+    },
+    "station": {
+      "setpoint_c": 60.0,
+      "setpoint_band_c": 2.5,
+      "mix_travel_pct_s": 9.0,
+      "batch_confirm_s": 8.0
+    },
+    "primary": {
+      "flow_baseline_t_h": 2400.0,
+      "flow_tolerance_t_h": 180.0,
+      "dispatch_rate_pct_s": 4.0
+    },
+    "secondary": {
+      "makeup_target_kpa": 320.0,
+      "makeup_min_kpa": 260.0,
+      "makeup_max_kpa": 420.0,
+      "makeup_confirm_s": 10.0,
+      "return_target_c": 45.0
+    },
+    "valve": {
+      "travel_pct_s": 12.0,
+      "settle_band_pct": 1.5
+    },
+    "pump": {
+      "ramp_t_h_s": 40.0,
+      "min_speed_pct": 20.0,
+      "max_speed_pct": 100.0
+    },
+    "pressure": {
+      "baseline_min_kpa": 240.0,
+      "baseline_max_kpa": 430.0,
+      "retrofit_confirm_s": 6.0
+    },
+    "quota": {
+      "meter_wrap_mwh": 100000.0,
+      "sample_period_s": 30.0,
+      "period_hours": 24.0
+    }
+  }
+}

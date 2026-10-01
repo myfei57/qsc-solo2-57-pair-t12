@@ -1,0 +1,30 @@
+[project]
+name = "heatnet"
+version = "1.0.0"
+description = "district heating sequencing and interlock utility"
+requires-python = ">=3.11"
+dependencies = []
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.setuptools]
+packages = [
+    "heatnet",
+    "heatnet.ns",
+    "heatnet.store",
+    "heatnet.audit",
+    "heatnet.source",
+    "heatnet.station",
+    "heatnet.primary",
+    "heatnet.secondary",
+    "heatnet.valve",
+    "heatnet.pump",
+    "heatnet.temp",
+    "heatnet.pressure",
+    "heatnet.quota",
+    "heatnet.sequence",
+    "heatnet.console",
+]
