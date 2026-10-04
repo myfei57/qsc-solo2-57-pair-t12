@@ -82,6 +82,11 @@ def _cmd_demo(args: argparse.Namespace) -> int:
 
     startup = platform.start()
     weather = platform.push_weather(args.outdoor_c, "demo-weather")
+    blends = [
+        platform.ingest_weather(name, args.outdoor_c + 0.2 * index)
+        for index, name in enumerate(platform.config.forecast.providers)
+    ]
+    blend = platform.blend_report()
     launch = platform.startup(args.outdoor_c, args.demand_pct, "demo-operator")
     preview = platform.plan_preview(args.demand_pct)
     dispatch = platform.dispatch(args.demand_pct, args.target_c, None, None)
@@ -108,6 +113,11 @@ def _cmd_demo(args: argparse.Namespace) -> int:
     report = {
         "startup": startup,
         "weather": {key: weather[key] for key in ("ok", "outdoor_c", "supply_c", "epoch", "violations")},
+        "blend": {
+            "ok": all(item["ok"] for item in blends),
+            "mode": blend["mode"],
+            "last_point": blend["last_point"],
+        },
         "launch": {key: launch[key] for key in ("ok", "stage", "flow_t_h", "supply_c", "violations")},
         "preview": preview[:3],
         "dispatch": {
@@ -134,6 +144,8 @@ def _cmd_demo(args: argparse.Namespace) -> int:
     _dump(report)
 
     failures = [name for name, item in probe.items() if not item["ok"]]
+    if not all(item["ok"] for item in blends):
+        failures.append("blend:ingest")
     for name, operation in (
         ("weather", weather),
         ("launch", launch),

@@ -114,6 +114,54 @@ class CurveLimits:
 
 
 @dataclass(frozen=True)
+class ForecastLimits:
+    """多源气象融合的缺报、新鲜度、偏差、兜底与预警约束。"""
+
+    providers: tuple[str, ...]
+    expect_period_s: float
+    fresh_after_s: float
+    max_deviation_c: float
+    hold_after_s: float
+    fallback_mean_c: float
+    fallback_amplitude_c: float
+    fallback_margin_c: float
+    warn_drop_c: float
+    warn_horizon_s: float
+    series_limit: int
+
+    @classmethod
+    def from_mapping(cls, section: Mapping[str, Any]) -> "ForecastLimits":
+        providers = section.get("providers")
+        if (
+            not isinstance(providers, list)
+            or not providers
+            or not all(isinstance(item, str) and item for item in providers)
+        ):
+            raise ConfigError("forecast.providers 必须是非空字符串列表", component="config")
+        if len(set(providers)) != len(providers):
+            raise ConfigError("forecast.providers 不能重名", component="config")
+        return cls(
+            providers=tuple(providers),
+            expect_period_s=_number(section, "expect_period_s", minimum=1.0),
+            fresh_after_s=_number(section, "fresh_after_s", minimum=1.0),
+            max_deviation_c=_number(section, "max_deviation_c", minimum=0.1),
+            hold_after_s=_number(section, "hold_after_s", minimum=0.0),
+            fallback_mean_c=_number(section, "fallback_mean_c"),
+            fallback_amplitude_c=_number(section, "fallback_amplitude_c", minimum=0.0),
+            fallback_margin_c=_number(section, "fallback_margin_c", minimum=0.0),
+            warn_drop_c=_number(section, "warn_drop_c", minimum=0.1),
+            warn_horizon_s=_number(section, "warn_horizon_s", minimum=1.0),
+            series_limit=int(_number(section, "series_limit", minimum=1.0)),
+        )
+
+    def fallback_range(self) -> tuple[float, float]:
+        """保守经验曲线的取值包络（中心已含冷偏置）。"""
+
+        center = self.fallback_mean_c - self.fallback_margin_c
+        return (center - self.fallback_amplitude_c, center + self.fallback_amplitude_c)
+
+
+@dataclass(frozen=True)
 class StationLimits:
     """换热站混水阀行程、设定点带与批量确认约束。"""
 
@@ -284,6 +332,7 @@ class PlatformConfig:
     storage_root: str
     source: SourceLimits
     curve: CurveLimits
+    forecast: ForecastLimits
     station: StationLimits
     primary: PrimaryLimits
     secondary: SecondaryLimits
@@ -303,11 +352,17 @@ class PlatformConfig:
             raise ConfigError("platform.storage_root 必须是非空字符串", component="config")
 
         limits = _section(mapping, "limits")
+        curve = CurveLimits.from_mapping(_section(limits, "curve"))
+        forecast = ForecastLimits.from_mapping(_section(limits, "forecast"))
+        fallback_low, fallback_high = forecast.fallback_range()
+        if not (curve.outdoor_in_range(fallback_low) and curve.outdoor_in_range(fallback_high)):
+            raise ConfigError("保守经验曲线包络必须落在供热曲线适用区间内", component="config")
         return cls(
             name=name,
             storage_root=storage_root,
             source=SourceLimits.from_mapping(_section(limits, "source")),
-            curve=CurveLimits.from_mapping(_section(limits, "curve")),
+            curve=curve,
+            forecast=forecast,
             station=StationLimits.from_mapping(_section(limits, "station")),
             primary=PrimaryLimits.from_mapping(_section(limits, "primary")),
             secondary=SecondaryLimits.from_mapping(_section(limits, "secondary")),
@@ -338,6 +393,9 @@ def default_config() -> PlatformConfig:
         storage_root="var/state",
         source=SourceLimits(92.0, 115.0, 35.0, 900.0, 4200.0, 12.0, 0.35),
         curve=CurveLimits(-26.0, 18.0, 55.0, 95.0, 1800.0),
+        forecast=ForecastLimits(
+            ("nmc", "cma-net", "local-tower"), 900.0, 1800.0, 4.0, 3600.0, -8.0, 6.0, 2.0, 4.0, 7200.0, 96
+        ),
         station=StationLimits(60.0, 2.5, 9.0, 8.0),
         primary=PrimaryLimits(2400.0, 180.0, 4.0),
         secondary=SecondaryLimits(320.0, 260.0, 420.0, 10.0, 45.0),
@@ -369,6 +427,19 @@ def config_to_mapping(cfg: PlatformConfig) -> dict:
                 "supply_low_c": cfg.curve.supply_low_c,
                 "supply_high_c": cfg.curve.supply_high_c,
                 "stale_after_s": cfg.curve.stale_after_s,
+            },
+            "forecast": {
+                "providers": list(cfg.forecast.providers),
+                "expect_period_s": cfg.forecast.expect_period_s,
+                "fresh_after_s": cfg.forecast.fresh_after_s,
+                "max_deviation_c": cfg.forecast.max_deviation_c,
+                "hold_after_s": cfg.forecast.hold_after_s,
+                "fallback_mean_c": cfg.forecast.fallback_mean_c,
+                "fallback_amplitude_c": cfg.forecast.fallback_amplitude_c,
+                "fallback_margin_c": cfg.forecast.fallback_margin_c,
+                "warn_drop_c": cfg.forecast.warn_drop_c,
+                "warn_horizon_s": cfg.forecast.warn_horizon_s,
+                "series_limit": cfg.forecast.series_limit,
             },
             "station": {
                 "setpoint_c": cfg.station.setpoint_c,

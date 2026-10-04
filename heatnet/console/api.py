@@ -46,6 +46,7 @@ class Api:
         add("GET", "/api/station/{name}", self._station)
         add("GET", "/api/valves", self._valves)
         add("GET", "/api/curve", self._curve)
+        add("GET", "/api/blend", lambda params, body: self._platform.blend_report())
         add("GET", "/api/forecast", self._forecast)
         add("GET", "/api/pressure", self._pressure)
         add("GET", "/api/quota", self._quota)
@@ -59,6 +60,7 @@ class Api:
         add("GET", "/api/store", self._store)
         add("GET", "/api/readiness", self._readiness)
         add("POST", "/api/weather", self._weather)
+        add("POST", "/api/blend/ingest", self._blend_ingest)
         add("POST", "/api/adjust", self._adjust)
         add("POST", "/api/startup", self._startup)
         add("POST", "/api/shutdown", self._shutdown)
@@ -253,6 +255,14 @@ class Api:
     def _weather(self, params: dict, body: dict) -> dict:
         return self._platform.push_weather(
             _as_float(body, "outdoor_c", 0.0), str(body.get("station", "console"))
+        )
+
+    def _blend_ingest(self, params: dict, body: dict) -> dict:
+        issued = body.get("issued_at")
+        return self._platform.ingest_weather(
+            str(body.get("provider", "")),
+            _as_float(body, "outdoor_c", 0.0),
+            None if issued is None else _as_float(body, "issued_at", 0.0),
         )
 
     def _adjust(self, params: dict, body: dict) -> dict:

@@ -20,6 +20,19 @@
       "supply_high_c": 95.0,
       "stale_after_s": 1800.0
     },
+    "forecast": {
+      "providers": ["nmc", "cma-net", "local-tower"],
+      "expect_period_s": 900.0,
+      "fresh_after_s": 1800.0,
+      "max_deviation_c": 4.0,
+      "hold_after_s": 3600.0,
+      "fallback_mean_c": -8.0,
+      "fallback_amplitude_c": 6.0,
+      "fallback_margin_c": 2.0,
+      "warn_drop_c": 4.0,
+      "warn_horizon_s": 7200.0,
+      "series_limit": 96
+    },
     "station": {
       "setpoint_c": 60.0,
       "setpoint_band_c": 2.5,

@@ -46,6 +46,7 @@ from .store.jsonfile import JsonStore
 from .store.journal import JsonlJournal
 from .store.metrics import StoreMetrics
 from .store.state import DurableState
+from .temp.blend import MODE_LIVE, ForecastBlender
 from .temp.curve import HeatCurve
 from .temp.forecast import build_forecast, describe_forecast
 from .telemetry import TrendBuffer
@@ -96,6 +97,7 @@ class Platform:
 
         self.zones = ZoneRegistry()
         self.curve = HeatCurve(self.config.curve)
+        self.blender = ForecastBlender(self.config.forecast)
         self.source = HeatSource(self.config.source)
         self.network = PrimaryNetwork(self.config.primary)
         self.secondary = SecondaryLoop(self.config.secondary)
@@ -348,6 +350,106 @@ class Platform:
             self._operations += 1
             self._persist()
             return {**report, **summary}
+
+    def _blend_locked(self, now: float, origin: str) -> dict:
+        """跑一轮多源合成并落到曲线与热源；调用方必须持有平台锁。
+
+        顺序定死：先提交序列点，再应用曲线，曲线校验失败立即回滚序列点，
+        只有序列与曲线都落成才发 ``blend_point`` 审计事件，三者不会分叉。
+        """
+
+        steps: list[dict] = []
+        violations: list[str] = []
+        decision = self.blender.decide(now)
+        point = self.blender.commit(decision)
+        steps.append({"component": "temp", "action": "blend_decide", "detail": point.as_dict()})
+        try:
+            applied = self.curve.apply_forecast(point.outdoor_c, now)
+        except PlantError as error:
+            self.blender.rollback(point.seq)
+            violations.append(error.message)
+            return {"ok": False, "steps": steps, "violations": violations, "mode": point.mode}
+        steps.append({"component": "temp", "action": "apply_forecast", "detail": applied})
+        try:
+            fired = self.source.fire(self.curve.supply_c())
+        except PlantError as error:
+            violations.append(error.message)
+        else:
+            steps.append(
+                {"component": "source", "action": "fire_forecast", "detail": {"temperature_c": round(fired, 2)}}
+            )
+        severity = "notice" if point.mode == MODE_LIVE and not point.excluded else "warning"
+        self.bus.publish(
+            Event.of(
+                "temp",
+                "temp",
+                "blend_point",
+                severity=severity,
+                message=f"合成室外温度 {point.outdoor_c:.1f}℃（{point.mode}）",
+                origin=origin,
+                **point.as_dict(),
+            )
+        )
+        if decision.warning:
+            span_c = point.outdoor_c - decision.projected_outdoor_c
+            tiers = build_forecast(self.curve.table, point.outdoor_c, drop_c=span_c / 4.0, steps=5)
+            self.bus.publish(
+                Event.of(
+                    "temp",
+                    "temp",
+                    "cold_warning",
+                    severity="warning",
+                    message=(
+                        f"未来 {self.config.forecast.warn_horizon_s / 3600.0:.1f}h 预计降温 "
+                        f"{span_c:.1f}℃，按档提温"
+                    ),
+                    origin=origin,
+                    projected_outdoor_c=round(decision.projected_outdoor_c, 2),
+                    drop_c_per_h=round(point.drop_c_per_h, 3),
+                    tiers=[tier.as_dict() for tier in tiers],
+                )
+            )
+        return {
+            "ok": not violations,
+            "steps": steps,
+            "violations": violations,
+            "mode": point.mode,
+            "outdoor_c": round(point.outdoor_c, 2),
+            "supply_c": round(self.curve.supply_c(), 2),
+            "epoch": self.curve.epoch(),
+            "warning": decision.warning,
+            "point": point.as_dict(),
+        }
+
+    def ingest_weather(self, provider: str, outdoor_c: float, issued_at: float | None = None) -> dict:
+        """接收一家预报来报，融合多家读数合成室外温度序列并落到曲线。"""
+
+        with self._lock:
+            op_id = self.ids.next()
+            now = self.clock.now()
+            issued = now if issued_at is None else float(issued_at)
+            ingest = self.blender.ingest(provider, outdoor_c, issued, now)
+            if not ingest["accepted"]:
+                report: dict = {
+                    "ok": False,
+                    "steps": [],
+                    "violations": [f"ingest_{ingest['reason']}"],
+                    "ingest": ingest,
+                }
+            else:
+                report = {**self._blend_locked(now, f"ingest:{provider}"), "ingest": ingest}
+            summary = self._record_operation(op_id, "weather_blend", report)
+            self._operations += 1
+            self._persist()
+            return {**report, **summary}
+
+    def blend_report(self) -> dict:
+        """多源融合总览：当前模式、各家状态、合成序列与曲线对照。"""
+
+        now = self.clock.now()
+        report = self.blender.report(now)
+        report["curve"] = self.curve.snapshot(now).as_dict()
+        return report
 
     def adjust_source(
         self, temperature_c: float, flow_t_h: float, origin: str = "manual"
@@ -625,6 +727,7 @@ class Platform:
             self._cycles += 1
             self.clock.sleep(dt)
             moment = self.clock.now()
+            blend = self._blend_locked(moment, "cycle") if self.blender.due(moment) else None
             flow = self.source.flow_t_h() or self.network.flow_t_h()
             report = advance_heating(
                 self.source, self.curve, self.network, self.secondary, flow, moment, dt
@@ -634,7 +737,10 @@ class Platform:
             self.trend.append("network_flow_t_h", moment, self.network.flow_t_h())
             self.trend.append("pressure_kpa", moment, self.secondary.pressure_kpa())
             self._persist()
-            return {"cycle": self._cycles, **report}
+            result = {"cycle": self._cycles, **report}
+            if blend is not None:
+                result["blend"] = blend
+            return result
 
     def concurrency_probe(self, rounds: int = 24) -> dict:
         """用真实并行调用探测热源调整与热量采集的原子性。
@@ -787,6 +893,7 @@ class Platform:
                 "trips": self.source.trips(),
             },
             "curve": self.curve_report(),
+            "blend": self.blend_report(),
             "primary": {
                 **self.network.snapshot().as_dict(),
                 "deviation_t_h": round(self.network.deviation_t_h(), 2),
