@@ -8,8 +8,27 @@
 from __future__ import annotations
 
 from .adjust import Adjustment, apply_adjustment
+from .fusion import (
+    FusionDecision,
+    FusionPoint,
+    ProviderReport,
+    WeatherFusion,
+    push_fused_weather,
+)
 from .source import HeatSource
 from .state import SourceSnapshot
 from .weather import WeatherPush, push_weather
 
-__all__ = ["Adjustment", "HeatSource", "SourceSnapshot", "WeatherPush", "apply_adjustment", "push_weather"]
+__all__ = [
+    "Adjustment",
+    "FusionDecision",
+    "FusionPoint",
+    "HeatSource",
+    "ProviderReport",
+    "SourceSnapshot",
+    "WeatherFusion",
+    "WeatherPush",
+    "apply_adjustment",
+    "push_fused_weather",
+    "push_weather",
+]

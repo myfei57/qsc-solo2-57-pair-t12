@@ -35,6 +35,13 @@ from .secondary.cycle import run_cycle
 from .secondary.loop import SecondaryLoop
 from .sequence import advance_heating, dispatch_demand, recalibrate_flow, shutdown_plant, startup_plant
 from .source.adjust import Adjustment, apply_adjustment
+from .source.fusion import (
+    MODE_CONSERVATIVE,
+    MODE_HOLD,
+    ProviderReport,
+    WeatherFusion,
+    push_fused_weather,
+)
 from .source.source import HeatSource
 from .source.weather import WeatherPush, push_weather
 from .station.batch import build_plan
@@ -96,6 +103,7 @@ class Platform:
 
         self.zones = ZoneRegistry()
         self.curve = HeatCurve(self.config.curve)
+        self.fusion = WeatherFusion(self.config.fusion, self.config.curve)
         self.source = HeatSource(self.config.source)
         self.network = PrimaryNetwork(self.config.primary)
         self.secondary = SecondaryLoop(self.config.secondary)
@@ -348,6 +356,83 @@ class Platform:
             self._operations += 1
             self._persist()
             return {**report, **summary}
+
+    def fuse_weather(self, reports: list[ProviderReport]) -> dict:
+        """合成一轮多源气象预报，更新曲线并让热源按新曲线点火。
+
+        缺报按部分失败处理（不参与合成），全部不可信时按时段兜底；合成结论、
+        曲线与审计落的是同一份值。
+        """
+
+        with self._lock:
+            op_id = self.ids.next()
+            now = self.clock.now()
+            report = push_fused_weather(self.source, self.curve, self.fusion, reports, now)
+            summary = self._record_operation(op_id, "weather_fusion", report)
+            decision = report.get("decision", {})
+            for name in decision.get("missing", []):
+                self.bus.publish(
+                    Event.of(
+                        "weather",
+                        "weather",
+                        "provider_missing",
+                        severity="warning",
+                        message=f"预报源 {name} 本轮缺报，按部分失败处理，不参与合成",
+                        op_id=op_id,
+                        provider=name,
+                    )
+                )
+            for item in decision.get("excluded", []):
+                self.bus.publish(
+                    Event.of(
+                        "weather",
+                        "weather",
+                        "report_excluded",
+                        severity="warning",
+                        message=f"预报源 {item['provider']} 报文被剔除：{item['reason']}",
+                        op_id=op_id,
+                        provider=item["provider"],
+                        reason=item["reason"],
+                    )
+                )
+            if report.get("ok") and report.get("mode") in (MODE_HOLD, MODE_CONSERVATIVE):
+                self.bus.publish(
+                    Event.of(
+                        "weather",
+                        "weather",
+                        "fallback",
+                        severity="warning",
+                        message=f"全部预报源不可信，按 {report['mode']} 兜底",
+                        op_id=op_id,
+                        mode=report["mode"],
+                        fallback_reason=decision.get("fallback_reason", ""),
+                        outdoor_c=report.get("outdoor_c"),
+                    )
+                )
+            alert = report.get("alert")
+            if alert:
+                self.bus.publish(
+                    Event.of(
+                        "weather",
+                        "weather",
+                        "cooling_alert",
+                        severity="warning",
+                        message=(
+                            f"降温趋势预警：{alert['horizon_s'] / 3600:.1f}h 内预计降温 "
+                            f"{alert['drop_c']}℃，供温档应提到 {alert['supply_target_c']}℃"
+                        ),
+                        op_id=op_id,
+                        **alert,
+                    )
+                )
+            self._operations += 1
+            self._persist()
+            return {**report, **summary}
+
+    def fusion_report(self) -> dict:
+        """多源合成状态：定死的选源规则、各家健康度、合成序列与最近一轮结论。"""
+
+        return self.fusion.report()
 
     def adjust_source(
         self, temperature_c: float, flow_t_h: float, origin: str = "manual"
@@ -787,6 +872,10 @@ class Platform:
                 "trips": self.source.trips(),
             },
             "curve": self.curve_report(),
+            "weather_fusion": {
+                "providers": self.fusion.health(),
+                "last": self.fusion.last_decision(),
+            },
             "primary": {
                 **self.network.snapshot().as_dict(),
                 "deviation_t_h": round(self.network.deviation_t_h(), 2),

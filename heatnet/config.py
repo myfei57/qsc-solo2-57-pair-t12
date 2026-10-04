@@ -114,6 +114,71 @@ class CurveLimits:
 
 
 @dataclass(frozen=True)
+class FusionLimits:
+    """多源气象合成：预报源名单、新鲜度门槛、可信偏差带、兜底时段与降温预警阈值。
+
+    选源规则在这里定死：新鲜度是硬门槛（过期报文直接作废，不参与排序），偏差是
+    排序依据（以当轮新鲜报文的中位数为基准，偏差带内的才可信，按偏差平方反比加权
+    合成）。全部来源不可信时按时段兜底：``conservative_hours`` 内切保守经验曲线，
+    其余时段沿用上一版合成值。
+    """
+
+    providers: tuple[str, ...]
+    fresh_after_s: float
+    max_deviation_c: float
+    min_providers: int
+    conservative_margin_c: float
+    conservative_hours: tuple[int, ...]
+    alert_drop_c: float
+    alert_horizon_s: float
+    series_limit: int
+
+    @classmethod
+    def from_mapping(cls, section: Mapping[str, Any]) -> "FusionLimits":
+        providers_raw = section.get("providers", _MISSING)
+        if providers_raw is _MISSING:
+            raise ConfigError("配置缺少字段 'providers'", component="config")
+        if not isinstance(providers_raw, (list, tuple)) or not providers_raw:
+            raise ConfigError("fusion.providers 必须是非空名单", component="config")
+        providers = tuple(str(item) for item in providers_raw)
+        if len(set(providers)) != len(providers):
+            raise ConfigError("fusion.providers 不能有重名", component="config")
+        hours_raw = section.get("conservative_hours", _MISSING)
+        if hours_raw is _MISSING:
+            raise ConfigError("配置缺少字段 'conservative_hours'", component="config")
+        if not isinstance(hours_raw, (list, tuple)):
+            raise ConfigError("fusion.conservative_hours 必须是小时列表", component="config")
+        hours = tuple(int(hour) for hour in hours_raw)
+        if any(hour < 0 or hour > 23 for hour in hours):
+            raise ConfigError("fusion.conservative_hours 必须落在 0..23", component="config")
+        limits = cls(
+            providers=providers,
+            fresh_after_s=_number(section, "fresh_after_s", minimum=1.0),
+            max_deviation_c=_number(section, "max_deviation_c", minimum=0.1),
+            min_providers=int(_number(section, "min_providers", minimum=1.0)),
+            conservative_margin_c=_number(section, "conservative_margin_c", minimum=0.0),
+            conservative_hours=hours,
+            alert_drop_c=_number(section, "alert_drop_c", minimum=0.1),
+            alert_horizon_s=_number(section, "alert_horizon_s", minimum=1.0),
+            series_limit=int(_number(section, "series_limit", minimum=2.0)),
+        )
+        if limits.min_providers > len(limits.providers):
+            raise ConfigError("fusion.min_providers 不能超过预报源数量", component="config")
+        return limits
+
+    def conservative_outdoor_c(self, curve: "CurveLimits") -> float:
+        """保守经验曲线取值：贴着曲线适用区间最冷端留一档余量。"""
+
+        return curve.outdoor_min_c + self.conservative_margin_c
+
+    def use_conservative(self, now: float) -> bool:
+        """当前时刻是否落在保守曲线时段（按 UTC 小时判定，与审计时间戳口径一致）。"""
+
+        hour = int((float(now) // 3600) % 24)
+        return hour in self.conservative_hours
+
+
+@dataclass(frozen=True)
 class StationLimits:
     """换热站混水阀行程、设定点带与批量确认约束。"""
 
@@ -284,6 +349,7 @@ class PlatformConfig:
     storage_root: str
     source: SourceLimits
     curve: CurveLimits
+    fusion: FusionLimits
     station: StationLimits
     primary: PrimaryLimits
     secondary: SecondaryLimits
@@ -308,6 +374,7 @@ class PlatformConfig:
             storage_root=storage_root,
             source=SourceLimits.from_mapping(_section(limits, "source")),
             curve=CurveLimits.from_mapping(_section(limits, "curve")),
+            fusion=FusionLimits.from_mapping(_section(limits, "fusion")),
             station=StationLimits.from_mapping(_section(limits, "station")),
             primary=PrimaryLimits.from_mapping(_section(limits, "primary")),
             secondary=SecondaryLimits.from_mapping(_section(limits, "secondary")),
@@ -338,6 +405,10 @@ def default_config() -> PlatformConfig:
         storage_root="var/state",
         source=SourceLimits(92.0, 115.0, 35.0, 900.0, 4200.0, 12.0, 0.35),
         curve=CurveLimits(-26.0, 18.0, 55.0, 95.0, 1800.0),
+        fusion=FusionLimits(
+            ("nmc", "ecmwf", "local"), 1800.0, 2.5, 2, 4.0,
+            (22, 23, 0, 1, 2, 3, 4, 5), 4.0, 7200.0, 96,
+        ),
         station=StationLimits(60.0, 2.5, 9.0, 8.0),
         primary=PrimaryLimits(2400.0, 180.0, 4.0),
         secondary=SecondaryLimits(320.0, 260.0, 420.0, 10.0, 45.0),
@@ -369,6 +440,17 @@ def config_to_mapping(cfg: PlatformConfig) -> dict:
                 "supply_low_c": cfg.curve.supply_low_c,
                 "supply_high_c": cfg.curve.supply_high_c,
                 "stale_after_s": cfg.curve.stale_after_s,
+            },
+            "fusion": {
+                "providers": list(cfg.fusion.providers),
+                "fresh_after_s": cfg.fusion.fresh_after_s,
+                "max_deviation_c": cfg.fusion.max_deviation_c,
+                "min_providers": cfg.fusion.min_providers,
+                "conservative_margin_c": cfg.fusion.conservative_margin_c,
+                "conservative_hours": list(cfg.fusion.conservative_hours),
+                "alert_drop_c": cfg.fusion.alert_drop_c,
+                "alert_horizon_s": cfg.fusion.alert_horizon_s,
+                "series_limit": cfg.fusion.series_limit,
             },
             "station": {
                 "setpoint_c": cfg.station.setpoint_c,

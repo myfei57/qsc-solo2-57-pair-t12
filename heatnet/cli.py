@@ -23,6 +23,7 @@ from .clock import ManualClock, SystemClock
 from .config import config_to_mapping, default_config, load_config
 from .console.server import ConsoleServer, probe_endpoints
 from .errors import PlantError
+from .source.fusion import ProviderReport
 
 DEFAULT_PROBE_PATHS = (
     "/api/status",
@@ -31,6 +32,7 @@ DEFAULT_PROBE_PATHS = (
     "/api/audit",
     "/api/stations",
     "/api/quota",
+    "/api/weather/fusion",
 )
 
 
@@ -82,6 +84,14 @@ def _cmd_demo(args: argparse.Namespace) -> int:
 
     startup = platform.start()
     weather = platform.push_weather(args.outdoor_c, "demo-weather")
+    # 多源合成演示：三家预报源同轮上报，一家读数略飘但在偏差带内。
+    fusion = platform.fuse_weather(
+        [
+            ProviderReport("nmc", args.outdoor_c - 0.4, platform.clock.now()),
+            ProviderReport("ecmwf", args.outdoor_c + 0.3, platform.clock.now()),
+            ProviderReport("local", args.outdoor_c, platform.clock.now()),
+        ]
+    )
     launch = platform.startup(args.outdoor_c, args.demand_pct, "demo-operator")
     preview = platform.plan_preview(args.demand_pct)
     dispatch = platform.dispatch(args.demand_pct, args.target_c, None, None)
@@ -108,6 +118,9 @@ def _cmd_demo(args: argparse.Namespace) -> int:
     report = {
         "startup": startup,
         "weather": {key: weather[key] for key in ("ok", "outdoor_c", "supply_c", "epoch", "violations")},
+        "fusion": {
+            key: fusion[key] for key in ("ok", "mode", "outdoor_c", "supply_c", "partial", "violations")
+        },
         "launch": {key: launch[key] for key in ("ok", "stage", "flow_t_h", "supply_c", "violations")},
         "preview": preview[:3],
         "dispatch": {
@@ -136,6 +149,7 @@ def _cmd_demo(args: argparse.Namespace) -> int:
     failures = [name for name, item in probe.items() if not item["ok"]]
     for name, operation in (
         ("weather", weather),
+        ("fusion", fusion),
         ("launch", launch),
         ("dispatch", dispatch),
         ("secondary", secondary),

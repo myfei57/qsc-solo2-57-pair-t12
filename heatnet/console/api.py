@@ -10,6 +10,7 @@ from __future__ import annotations
 from ..app import Platform
 from ..audit.timeline import build_timeline
 from ..errors import PlantError
+from ..source.fusion import ProviderReport
 from ..station.service import CancelToken
 from .router import Router
 
@@ -58,7 +59,9 @@ class Api:
         add("GET", "/api/journal", self._journal)
         add("GET", "/api/store", self._store)
         add("GET", "/api/readiness", self._readiness)
+        add("GET", "/api/weather/fusion", self._fusion_status)
         add("POST", "/api/weather", self._weather)
+        add("POST", "/api/weather/fusion", self._weather_fusion)
         add("POST", "/api/adjust", self._adjust)
         add("POST", "/api/startup", self._startup)
         add("POST", "/api/shutdown", self._shutdown)
@@ -254,6 +257,32 @@ class Api:
         return self._platform.push_weather(
             _as_float(body, "outdoor_c", 0.0), str(body.get("station", "console"))
         )
+
+    def _fusion_status(self, params: dict, body: dict) -> dict:
+        return self._platform.fusion_report()
+
+    def _weather_fusion(self, params: dict, body: dict) -> dict:
+        raw = body.get("reports")
+        if not isinstance(raw, list) or not raw:
+            raise ValueError("reports 必须是非空列表")
+        now = self._platform.clock.now()
+        reports: list[ProviderReport] = []
+        for item in raw:
+            if not isinstance(item, dict):
+                raise ValueError("reports 元素必须是对象")
+            provider = str(item.get("provider", "")).strip()
+            if not provider:
+                raise ValueError("reports 缺少 provider")
+            if "outdoor_c" not in item:
+                raise ValueError(f"预报源 {provider} 缺少 outdoor_c")
+            reports.append(
+                ProviderReport(
+                    provider,
+                    _as_float(item, "outdoor_c", 0.0),
+                    _as_float(item, "issued_at", now),
+                )
+            )
+        return self._platform.fuse_weather(reports)
 
     def _adjust(self, params: dict, body: dict) -> dict:
         return self._platform.adjust_source(
